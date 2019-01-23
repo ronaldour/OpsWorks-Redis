@@ -1,0 +1,26 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Master stack that deploy all resources needed for an Opsworks
+  Stack application
+Parameters:
+  TemplatesBucketName:
+    Description: Bucket name of the cloud formation templates
+    Type: String
+Resources:
+  VPC:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplatesBucketName}/cf-templates/${AWS::StackName}/infrastructure/network.yml
+      Parameters:
+        EnvironmentName: !Ref AWS::StackName
+        VPCCidr: 192.168.1.0/24
+        SetNatGateway: false
+  OpsWorks:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub https://s3.amazonaws.com/${TemplatesBucketName}/cf-templates/${AWS::StackName}/infrastructure/opsworks.yml
+      Parameters:
+        EnvironmentName: !Ref AWS::StackName
+        VPC: !GetAtt VPC.Outputs.VPC
+        DefaultSubnet: !GetAtt VPC.Outputs.PublicSubnet1
+    DependsOn: VPC

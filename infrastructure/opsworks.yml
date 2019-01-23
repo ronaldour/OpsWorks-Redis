@@ -1,0 +1,182 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Resources needed to deploy an OpsWorks Stack for a Redis cluster
+  It includes the OpsWorks Stack and 3 layers
+  -A load balancer layer
+  -A Redis Master Instance layer
+  -A Redis Slave Instance layer
+Parameters:
+  EnvironmentName:
+    Description: An environment name that will be prefixed to resource names
+    Type: String
+  VPC:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy all the ElastiCache resources
+  DefaultSubnet:
+    Description: The default subnet where instances are launched
+    Type: String
+  KeyName:
+    Description: Name of an existing EC2 key pair to enable SSH access to the instances
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: masterkey
+Resources:
+  ######### Security Groups #########
+  RedisInstanceSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPC
+      GroupName: RedisInstanceSG
+      GroupDescription: "Only allow connections to the specified port"
+      SecurityGroupIngress:
+        - { IpProtocol: 6, CidrIp: "0.0.0.0/0", FromPort: 6379, ToPort: 6379 }
+        - { IpProtocol: 6, CidrIp: "0.0.0.0/0", FromPort: 22, ToPort: 22 }
+        - { IpProtocol: 6, CidrIp: "0.0.0.0/0", FromPort: 16379, ToPort: 16379 }
+      SecurityGroupEgress:
+        - { IpProtocol: -1, CidrIp: "0.0.0.0/0" }
+      Tags:
+        - Key: "Name"
+          Value: !Sub "${EnvironmentName}-RedisInstanceSG"
+  ############# IAM Roles ############
+  OpsWorksServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 
+            - opsworks.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: !Sub "${EnvironmentName}-OpsWorksPolicy"
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - ec2:*
+            - iam:PassRole
+            - cloudwatch:GetMetricStatistics
+            - cloudwatch:DescribeAlarms
+            - elasticloadbalancing:*
+            Resource: '*'
+  OpsWorksInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+  OpsWorksInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+      - Ref: OpsWorksInstanceRole
+    DependsOn:
+      - OpsWorksInstanceRole
+  ########### OpsWorks Stack ###########
+  OpsworksStack:
+    Type: AWS::OpsWorks::Stack
+    Properties: 
+      Name: !Sub "${EnvironmentName}-Stack"
+      VpcId: !Ref VPC
+      ConfigurationManager:
+        Name: Chef
+        Version: 12
+      CustomCookbooksSource:
+        Type: git
+        Url: 'https://github.com/ronaldour/redis-cluster-chef.git'
+      DefaultInstanceProfileArn: !GetAtt OpsWorksInstanceProfile.Arn
+      DefaultSshKeyName: !Ref KeyName
+      DefaultOs: 'Amazon Linux 2018.03'
+      DefaultSubnetId: !Ref DefaultSubnet
+      ServiceRoleArn: !GetAtt OpsWorksServiceRole.Arn
+      UseCustomCookbooks: true
+    DependsOn:
+      - OpsWorksInstanceProfile
+      - OpsWorksServiceRole
+  ############## Layers ##############
+  MasterLayer:
+    Type: AWS::OpsWorks::Layer
+    Properties:
+      Name: master
+      Shortname: master
+      Type: custom
+      StackId: !Ref OpsworksStack
+      AutoAssignElasticIps: false
+      AutoAssignPublicIps: true
+      CustomSecurityGroupIds:
+        - !GetAtt RedisInstanceSG.GroupId
+      EnableAutoHealing: true
+      CustomRecipes:
+        Setup:
+          - redis::master
+        Configure:
+          - redis::sentinel
+  SlaveLayer:
+    Type: AWS::OpsWorks::Layer
+    Properties:
+      Name: slave
+      Shortname: slave
+      Type: custom
+      StackId: !Ref OpsworksStack
+      AutoAssignElasticIps: false
+      AutoAssignPublicIps: true
+      CustomSecurityGroupIds:
+        - !GetAtt RedisInstanceSG.GroupId
+      EnableAutoHealing: true
+      CustomRecipes:
+        Setup:
+          - redis::slave
+        Configure:
+          - redis::sentinel
+  ############# Instances ############
+  Master:
+    Type: AWS::OpsWorks::Instance
+    Properties:
+      StackId: !Ref OpsworksStack
+      LayerIds:
+        - !Ref MasterLayer
+      Hostname : Master
+      InstanceType: m1.medium
+    DependsOn:
+      - MasterLayer
+  Slave1:
+    Type: AWS::OpsWorks::Instance
+    Properties:
+      StackId: !Ref OpsworksStack
+      LayerIds:
+        - !Ref SlaveLayer
+      Hostname : Slave1
+      InstanceType: m1.medium
+    DependsOn:
+      - SlaveLayer
+      - Master
+  Slave2:
+    Type: AWS::OpsWorks::Instance
+    Properties:
+      StackId: !Ref OpsworksStack
+      LayerIds:
+        - !Ref SlaveLayer
+      Hostname : Slave2
+      InstanceType: m1.medium
+    DependsOn:
+      - SlaveLayer
+      - Master
+Outputs:
+  MasterIp:
+    Description: 'The Master node public IP'
+    Value: !GetAtt Master.PublicIp
+  Slave1Ip:
+    Description: 'The Slave1 node public IP'
+    Value: !GetAtt Slave1.PublicIp
+  Slave2Ip:
+    Description: 'The Slave2 node public IP'
+    Value: !GetAtt Slave2.PublicIp
